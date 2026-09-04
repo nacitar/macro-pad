@@ -15,6 +15,10 @@
  */
 #include QMK_KEYBOARD_H
 #include "gpio.h"
+#include "hardware/gpio.h"
+#include "hardware/structs/ioqspi.h"
+#include "hardware/structs/sio.h"
+#include "hardware/sync.h"
 
 /* ---- Wiring --------------------------------------------------------------
  * Update these once the enclosure is drilled and the LED is wired to its
@@ -25,12 +29,12 @@
 #define STATUS_LED_ACTIVE_HIGH true
 
 /* ---- Automation tuning ----------------------------------------------------
- * AUTOMATION_START_ENABLED defaults to true because no button is wired yet:
- * the device demonstrates itself on plug-in. Once the button is attached,
- * flip this to false so the real button press is what turns it on.
+ * A real toggle source (BOOTSEL, below) exists, so start disabled and let
+ * a press turn it on — matches the eventual button-driven behavior.
  * -------------------------------------------------------------------------- */
 #define AUTOMATION_INTERVAL_MS 30000
-#define AUTOMATION_START_ENABLED true
+#define AUTOMATION_START_ENABLED false
+#define BOOTSEL_POLL_INTERVAL_MS 20
 
 enum custom_keycodes {
     MP_TOGGLE = SAFE_RANGE,
@@ -42,6 +46,8 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
 static bool     automation_enabled = AUTOMATION_START_ENABLED;
 static uint32_t last_fire_time     = 0;
+static uint32_t last_bootsel_poll  = 0;
+static bool     bootsel_was_pressed = false;
 
 /* ============================================================================
  * >>> THE EXTENSION POINT <<<
@@ -54,6 +60,24 @@ static uint32_t last_fire_time     = 0;
  * ============================================================================ */
 static void automation_tick(void) {
     tap_code(KC_F15);
+}
+
+/* BOOTSEL shares the flash chip-select line, not a normal GPIO — reading it
+ * means briefly floating that line from RAM-resident code while flash (and
+ * therefore this very function, if it weren't RAM-resident) is unreachable.
+ * Standard Pico SDK technique; QMK's own RP2040 flash driver uses the same
+ * approach. This only samples the pin — it can never re-enter the ROM
+ * bootloader, which still requires a real power-on/reset to trigger. */
+static bool __no_inline_not_in_flash_func(bootsel_pressed)(void) {
+    const uint32_t cs_pin_index = 1;
+    uint32_t       flags        = save_and_disable_interrupts();
+    hw_write_masked(&ioqspi_hw->io[cs_pin_index].ctrl, GPIO_OVERRIDE_LOW << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB, IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+    for (volatile int i = 0; i < 1000; ++i) {
+    }
+    bool pressed = !(sio_hw->gpio_hi_in & (1u << 1));
+    hw_write_masked(&ioqspi_hw->io[cs_pin_index].ctrl, GPIO_OVERRIDE_NORMAL << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB, IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+    restore_interrupts(flags);
+    return pressed;
 }
 
 static void status_led_set(bool on) {
@@ -83,6 +107,18 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 }
 
 void matrix_scan_user(void) {
+    /* Temporary bring-up toggle: BOOTSEL, until a real button is wired.
+     * Independent of the key matrix — bypasses process_record_user
+     * entirely and toggles automation directly on the press edge. */
+    if (timer_elapsed32(last_bootsel_poll) >= BOOTSEL_POLL_INTERVAL_MS) {
+        last_bootsel_poll   = timer_read32();
+        bool pressed        = bootsel_pressed();
+        if (pressed && !bootsel_was_pressed) {
+            automation_set(!automation_enabled);
+        }
+        bootsel_was_pressed = pressed;
+    }
+
     if (!automation_enabled) {
         return;
     }
