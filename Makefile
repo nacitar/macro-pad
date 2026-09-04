@@ -3,6 +3,24 @@ KB := nacitar/macropad
 KM := default
 SYMLINK := $(QMK_HOME)/keyboards/nacitar
 
+# Which automation payload to build — see AUTOMATION_MODE_* in keymap.c.
+# `make build MODE=mouse` etc.; no file editing required.
+MODE ?= fkey
+ifeq ($(MODE),fkey)
+    AUTOMATION_MODE_VALUE := 1
+    MOUSEKEY_ENABLE_VALUE := no
+else ifeq ($(MODE),intl)
+    AUTOMATION_MODE_VALUE := 2
+    MOUSEKEY_ENABLE_VALUE := no
+else ifeq ($(MODE),mouse)
+    AUTOMATION_MODE_VALUE := 3
+    MOUSEKEY_ENABLE_VALUE := yes
+else
+    $(error Unknown MODE "$(MODE)" — expected one of: fkey intl mouse)
+endif
+export AUTOMATION_MODE_VALUE
+export MOUSEKEY_ENABLE_VALUE
+
 .PHONY: build flash clean doctor info shell link
 
 link:
@@ -14,7 +32,7 @@ link:
 	fi
 
 build: link
-	uv run qmk compile -kb $(KB) -km $(KM)
+	uv run qmk compile -kb $(KB) -km $(KM) -e AUTOMATION_MODE=$(AUTOMATION_MODE_VALUE) -e MOUSEKEY_ENABLE=$(MOUSEKEY_ENABLE_VALUE)
 
 flash: link
 	./scripts/flash.sh

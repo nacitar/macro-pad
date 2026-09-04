@@ -37,10 +37,12 @@
 #define BOOTSEL_POLL_INTERVAL_MS 20
 
 /* ---- Automation payload ----------------------------------------------------
- * Pick what automation_tick() sends by changing AUTOMATION_MODE below and
- * reflashing — see automation_tick() for what each mode actually does.
+ * Pick what automation_tick() sends with `make build MODE=<fkey|intl|mouse>`
+ * (see the top-level Makefile) — no file editing required. AUTOMATION_MODE
+ * is passed in as a compiler -D define when MODE is given; the #ifndef below
+ * only supplies a default for a plain `make build` with no MODE argument.
  * AUTOMATION_MODE_MOUSE_JIGGLE additionally requires "mousekey": true in
- * keyboard.json (enforced below); the others require no config change.
+ * keyboard.json (enforced below); MODE=mouse sets that automatically too.
  * -------------------------------------------------------------------------- */
 /* Values start at 1, not 0: the preprocessor treats an undefined identifier
  * used in #if as 0, so a misspelled AUTOMATION_MODE would otherwise silently
@@ -49,7 +51,9 @@
 #define AUTOMATION_MODE_INTL_KEY 2     /* tap a JIS/Korean-only key; inert on US layouts */
 #define AUTOMATION_MODE_MOUSE_JIGGLE 3 /* +1/-1 mouse move; nets zero, needs "mousekey": true */
 
-#define AUTOMATION_MODE AUTOMATION_MODE_FKEY
+#ifndef AUTOMATION_MODE
+#    define AUTOMATION_MODE AUTOMATION_MODE_FKEY
+#endif
 
 #if AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE && !defined(MOUSE_ENABLE)
 #    error "AUTOMATION_MODE_MOUSE_JIGGLE requires \"mousekey\": true in keyboards/nacitar/macropad/keyboard.json"

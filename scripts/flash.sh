@@ -36,5 +36,7 @@ else
     echo "Already mounted at $mountpoint"
 fi
 
-echo "Flashing..."
-uv run qmk flash -kb "$KB" -km "$KM"
+echo "Flashing (AUTOMATION_MODE=${AUTOMATION_MODE_VALUE:-1}, MOUSEKEY_ENABLE=${MOUSEKEY_ENABLE_VALUE:-no})..."
+uv run qmk flash -kb "$KB" -km "$KM" \
+    -e "AUTOMATION_MODE=${AUTOMATION_MODE_VALUE:-1}" \
+    -e "MOUSEKEY_ENABLE=${MOUSEKEY_ENABLE_VALUE:-no}"
