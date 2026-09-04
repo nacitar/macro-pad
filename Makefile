@@ -5,18 +5,15 @@ SYMLINK := $(QMK_HOME)/keyboards/nacitar
 
 # Which automation payload to build — see AUTOMATION_MODE_* in keymap.c.
 # `make build MODE=mouse` etc.; no file editing required.
-MODE ?= fkey
-ifeq ($(MODE),fkey)
+MODE ?= scroll
+ifeq ($(MODE),scroll)
     AUTOMATION_MODE_VALUE := 1
     MOUSEKEY_ENABLE_VALUE := no
-else ifeq ($(MODE),intl)
-    AUTOMATION_MODE_VALUE := 2
-    MOUSEKEY_ENABLE_VALUE := no
 else ifeq ($(MODE),mouse)
-    AUTOMATION_MODE_VALUE := 3
+    AUTOMATION_MODE_VALUE := 2
     MOUSEKEY_ENABLE_VALUE := yes
 else
-    $(error Unknown MODE "$(MODE)" — expected one of: fkey intl mouse)
+    $(error Unknown MODE "$(MODE)" — expected one of: scroll mouse)
 endif
 export AUTOMATION_MODE_VALUE
 export MOUSEKEY_ENABLE_VALUE

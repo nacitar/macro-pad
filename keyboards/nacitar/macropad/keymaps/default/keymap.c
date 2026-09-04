@@ -19,6 +19,7 @@
 #include "hardware/structs/ioqspi.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
+#include <stdlib.h>
 
 /* ---- Wiring --------------------------------------------------------------
  * Update these once the enclosure is drilled and the LED is wired to its
@@ -31,13 +32,17 @@
 /* ---- Automation tuning ----------------------------------------------------
  * A real toggle source (BOOTSEL, below) exists, so start disabled and let
  * a press turn it on — matches the eventual button-driven behavior.
+ *
+ * Interval is randomized (uniformly) between MIN and MAX on every firing,
+ * not fixed, so the automation doesn't look like a metronome.
  * -------------------------------------------------------------------------- */
-#define AUTOMATION_INTERVAL_MS 30000
+#define AUTOMATION_INTERVAL_MIN_MS 60000  /* 1 minute */
+#define AUTOMATION_INTERVAL_MAX_MS 240000 /* 4 minutes */
 #define AUTOMATION_START_ENABLED false
 #define BOOTSEL_POLL_INTERVAL_MS 20
 
 /* ---- Automation payload ----------------------------------------------------
- * Pick what automation_tick() sends with `make build MODE=<fkey|intl|mouse>`
+ * Pick what automation_tick() sends with `make build MODE=<scroll|mouse>`
  * (see the top-level Makefile) — no file editing required. AUTOMATION_MODE
  * is passed in as a compiler -D define when MODE is given; the #ifndef below
  * only supplies a default for a plain `make build` with no MODE argument.
@@ -47,12 +52,11 @@
 /* Values start at 1, not 0: the preprocessor treats an undefined identifier
  * used in #if as 0, so a misspelled AUTOMATION_MODE would otherwise silently
  * alias whichever mode was assigned 0 instead of hitting the #error below. */
-#define AUTOMATION_MODE_FKEY 1         /* tap an unused F-key (current default) */
-#define AUTOMATION_MODE_INTL_KEY 2     /* tap a JIS/Korean-only key; inert on US layouts */
-#define AUTOMATION_MODE_MOUSE_JIGGLE 3 /* +1/-1 mouse move; nets zero, needs "mousekey": true */
+#define AUTOMATION_MODE_SCROLLING 1    /* random page/arrow scrolling, bounded and reversible (default) */
+#define AUTOMATION_MODE_MOUSE_JIGGLE 2 /* random bounded mouse drift; needs "mousekey": true */
 
 #ifndef AUTOMATION_MODE
-#    define AUTOMATION_MODE AUTOMATION_MODE_FKEY
+#    define AUTOMATION_MODE AUTOMATION_MODE_SCROLLING
 #endif
 
 #if AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE && !defined(MOUSE_ENABLE)
@@ -69,8 +73,134 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
 
 static bool     automation_enabled = AUTOMATION_START_ENABLED;
 static uint32_t last_fire_time     = 0;
+static uint32_t next_interval_ms   = AUTOMATION_INTERVAL_MIN_MS;
 static uint32_t last_bootsel_poll  = 0;
 static bool     bootsel_was_pressed = false;
+
+/* ============================================================================
+ * Bounded reversible list — shared random-walk engine behind both
+ * AUTOMATION_MODE_SCROLLING and AUTOMATION_MODE_MOUSE_JIGGLE below. An
+ * "entry" is up to two independent int8_t values (a direction bit for
+ * scrolling; a (dx, dy) pair for mouse jiggle — unused fields just stay 0).
+ *
+ * On each tick, given a list of at most BOUNDED_LIST_CAPACITY entries:
+ *   - empty list -> always generate() + apply() a new entry
+ *   - full list   -> always pick an existing entry at random, apply() it
+ *                    inverted (undoing it), and remove it
+ *   - otherwise    -> coin flip between the two
+ * Since removal only happens by undoing exactly what was added, and only
+ * pushes grow the list, net displacement from the starting point can never
+ * exceed BOUNDED_LIST_CAPACITY entries — it wanders, but stays on a leash.
+ * Callers supply generate() (build a new entry) and apply() (send it, or
+ * send its inverse) — the list bookkeeping and the push/pop decision are
+ * identical either way, this is the only copy of that logic.
+ * ============================================================================ */
+#define BOUNDED_LIST_CAPACITY 10
+
+typedef struct {
+    int8_t a;
+    int8_t b;
+} bounded_list_entry_t;
+
+typedef struct {
+    bounded_list_entry_t entries[BOUNDED_LIST_CAPACITY];
+    uint8_t               count;
+} bounded_list_t;
+
+typedef bounded_list_entry_t (*bounded_list_generate_fn)(void *ctx);
+typedef void (*bounded_list_apply_fn)(void *ctx, bounded_list_entry_t entry, bool invert);
+
+static void bounded_list_clear(bounded_list_t *list) {
+    list->count = 0;
+}
+
+static void bounded_list_tick(bounded_list_t *list, void *ctx, bounded_list_generate_fn generate, bounded_list_apply_fn apply) {
+    bool push;
+    if (list->count == 0) {
+        push = true;
+    } else if (list->count >= BOUNDED_LIST_CAPACITY) {
+        push = false;
+    } else {
+        push = rand() % 2;
+    }
+
+    if (push) {
+        bounded_list_entry_t entry = generate(ctx);
+        apply(ctx, entry, false);
+        list->entries[list->count++] = entry;
+    } else {
+        uint8_t               idx   = rand() % list->count;
+        bounded_list_entry_t  entry = list->entries[idx];
+        list->entries[idx]          = list->entries[--list->count]; /* swap-remove */
+        apply(ctx, entry, true);                                    /* inverted: undo it */
+    }
+}
+
+#if AUTOMATION_MODE == AUTOMATION_MODE_SCROLLING
+/* ---- Scrolling mode -------------------------------------------------------
+ * Two independent bounded lists: page up/down, and arrow up/down. Each
+ * entry's `a` field is the direction (0 = up, 1 = down); `b` is unused.
+ * automation_tick() picks one of the two lists at random each firing.
+ * -------------------------------------------------------------------------- */
+typedef struct {
+    uint8_t key_up;
+    uint8_t key_down;
+} scroll_ctx_t;
+
+static bounded_list_t     page_list   = {0};
+static bounded_list_t     arrow_list  = {0};
+static const scroll_ctx_t page_ctx    = {KC_PGUP, KC_PGDN};
+static const scroll_ctx_t arrow_ctx   = {KC_UP, KC_DOWN};
+
+static bounded_list_entry_t scroll_generate(void *ctx) {
+    (void)ctx;
+    return (bounded_list_entry_t){.a = (int8_t)(rand() % 2)};
+}
+
+static void scroll_apply(void *ctx, bounded_list_entry_t entry, bool invert) {
+    const scroll_ctx_t *sctx = (const scroll_ctx_t *)ctx;
+    bool                 down = entry.a;
+    if (invert) {
+        down = !down;
+    }
+    tap_code(down ? sctx->key_down : sctx->key_up);
+}
+#endif
+
+#if AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE
+/* ---- Mouse jiggle mode -----------------------------------------------------
+ * One bounded list of past relative moves. Each entry's `a`/`b` are the
+ * (dx, dy) delta, independently in [-MOUSE_JIGGLE_MAX_UNITS,
+ * MOUSE_JIGGLE_MAX_UNITS] but never both 0. Net displacement on either axis
+ * can never exceed BOUNDED_LIST_CAPACITY * MOUSE_JIGGLE_MAX_UNITS units.
+ * -------------------------------------------------------------------------- */
+#    define MOUSE_JIGGLE_MAX_UNITS 5
+
+static bounded_list_t mouse_jiggle_list = {0};
+
+/* Uniform in [-MOUSE_JIGGLE_MAX_UNITS, MOUSE_JIGGLE_MAX_UNITS]. */
+static int8_t mouse_jiggle_random_axis(void) {
+    return (int8_t)(rand() % (2 * MOUSE_JIGGLE_MAX_UNITS + 1)) - MOUSE_JIGGLE_MAX_UNITS;
+}
+
+static bounded_list_entry_t mouse_jiggle_generate(void *ctx) {
+    (void)ctx;
+    bounded_list_entry_t entry;
+    do {
+        entry.a = mouse_jiggle_random_axis();
+        entry.b = mouse_jiggle_random_axis();
+    } while (entry.a == 0 && entry.b == 0); /* (0, 0) isn't a valid move */
+    return entry;
+}
+
+static void mouse_jiggle_apply(void *ctx, bounded_list_entry_t entry, bool invert) {
+    (void)ctx;
+    report_mouse_t report = {0};
+    report.x              = invert ? -entry.a : entry.a;
+    report.y              = invert ? -entry.b : entry.b;
+    host_mouse_send(&report);
+}
+#endif
 
 /* ============================================================================
  * >>> THE EXTENSION POINT <<<
@@ -82,18 +212,14 @@ static bool     bootsel_was_pressed = false;
  * is decided.
  * ============================================================================ */
 static void automation_tick(void) {
-#if AUTOMATION_MODE == AUTOMATION_MODE_FKEY
-    tap_code(KC_F15);
-#elif AUTOMATION_MODE == AUTOMATION_MODE_INTL_KEY
-    tap_code(KC_INTERNATIONAL_1);
+#if AUTOMATION_MODE == AUTOMATION_MODE_SCROLLING
+    if (rand() % 2) {
+        bounded_list_tick(&page_list, (void *)&page_ctx, scroll_generate, scroll_apply);
+    } else {
+        bounded_list_tick(&arrow_list, (void *)&arrow_ctx, scroll_generate, scroll_apply);
+    }
 #elif AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE
-    report_mouse_t report = {0};
-    report.x = 1;
-    host_mouse_send(&report);
-    report.x = -1;
-    host_mouse_send(&report);
-    report.x = 0;
-    host_mouse_send(&report);
+    bounded_list_tick(&mouse_jiggle_list, NULL, mouse_jiggle_generate, mouse_jiggle_apply);
 #else
 #    error "Unrecognized AUTOMATION_MODE value — check it's spelled exactly as one of the AUTOMATION_MODE_* constants above"
 #endif
@@ -121,9 +247,30 @@ static void status_led_set(bool on) {
     gpio_write_pin(STATUS_LED_PIN, STATUS_LED_ACTIVE_HIGH ? on : !on);
 }
 
+/* Uniform in [AUTOMATION_INTERVAL_MIN_MS, AUTOMATION_INTERVAL_MAX_MS]. */
+static uint32_t random_interval_ms(void) {
+    return AUTOMATION_INTERVAL_MIN_MS + (rand() % (AUTOMATION_INTERVAL_MAX_MS - AUTOMATION_INTERVAL_MIN_MS + 1));
+}
+
 static void automation_set(bool enabled) {
     automation_enabled = enabled;
     last_fire_time      = timer_read32();
+    if (enabled) {
+        /* Reseed on every enable, not just once at boot: timer_read32() at
+         * power-on is always near-zero (same seed every time), but the
+         * moment a user actually presses the toggle is unpredictable. */
+        srand(timer_read32());
+        next_interval_ms = random_interval_ms();
+    } else {
+        /* Start fresh next time: don't carry a half-undone walk across a
+         * disable/enable cycle. */
+#if AUTOMATION_MODE == AUTOMATION_MODE_SCROLLING
+        bounded_list_clear(&page_list);
+        bounded_list_clear(&arrow_list);
+#elif AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE
+        bounded_list_clear(&mouse_jiggle_list);
+#endif
+    }
     status_led_set(enabled);
 }
 
@@ -159,9 +306,10 @@ void matrix_scan_user(void) {
     if (!automation_enabled) {
         return;
     }
-    if (timer_elapsed32(last_fire_time) < AUTOMATION_INTERVAL_MS) {
+    if (timer_elapsed32(last_fire_time) < next_interval_ms) {
         return;
     }
-    last_fire_time = timer_read32();
+    last_fire_time   = timer_read32();
+    next_interval_ms = random_interval_ms();
     automation_tick();
 }
