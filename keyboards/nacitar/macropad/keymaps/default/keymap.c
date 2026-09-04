@@ -36,6 +36,25 @@
 #define AUTOMATION_START_ENABLED false
 #define BOOTSEL_POLL_INTERVAL_MS 20
 
+/* ---- Automation payload ----------------------------------------------------
+ * Pick what automation_tick() sends by changing AUTOMATION_MODE below and
+ * reflashing — see automation_tick() for what each mode actually does.
+ * AUTOMATION_MODE_MOUSE_JIGGLE additionally requires "mousekey": true in
+ * keyboard.json (enforced below); the others require no config change.
+ * -------------------------------------------------------------------------- */
+/* Values start at 1, not 0: the preprocessor treats an undefined identifier
+ * used in #if as 0, so a misspelled AUTOMATION_MODE would otherwise silently
+ * alias whichever mode was assigned 0 instead of hitting the #error below. */
+#define AUTOMATION_MODE_FKEY 1         /* tap an unused F-key (current default) */
+#define AUTOMATION_MODE_INTL_KEY 2     /* tap a JIS/Korean-only key; inert on US layouts */
+#define AUTOMATION_MODE_MOUSE_JIGGLE 3 /* +1/-1 mouse move; nets zero, needs "mousekey": true */
+
+#define AUTOMATION_MODE AUTOMATION_MODE_FKEY
+
+#if AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE && !defined(MOUSE_ENABLE)
+#    error "AUTOMATION_MODE_MOUSE_JIGGLE requires \"mousekey\": true in keyboards/nacitar/macropad/keyboard.json"
+#endif
+
 enum custom_keycodes {
     MP_TOGGLE = SAFE_RANGE,
 };
@@ -59,7 +78,21 @@ static bool     bootsel_was_pressed = false;
  * is decided.
  * ============================================================================ */
 static void automation_tick(void) {
+#if AUTOMATION_MODE == AUTOMATION_MODE_FKEY
     tap_code(KC_F15);
+#elif AUTOMATION_MODE == AUTOMATION_MODE_INTL_KEY
+    tap_code(KC_INTERNATIONAL_1);
+#elif AUTOMATION_MODE == AUTOMATION_MODE_MOUSE_JIGGLE
+    report_mouse_t report = {0};
+    report.x = 1;
+    host_mouse_send(&report);
+    report.x = -1;
+    host_mouse_send(&report);
+    report.x = 0;
+    host_mouse_send(&report);
+#else
+#    error "Unrecognized AUTOMATION_MODE value — check it's spelled exactly as one of the AUTOMATION_MODE_* constants above"
+#endif
 }
 
 /* BOOTSEL shares the flash chip-select line, not a normal GPIO — reading it
