@@ -14,8 +14,15 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include QMK_KEYBOARD_H
-#include "gpio.h"
 #include "hardware/gpio.h"
+/* QMK_KEYBOARD_H pulls in ChibiOS's own RP2040 CMSIS header, which #defines
+ * PWM as a peripheral-struct pointer (lib/chibios/os/common/ext/RP/RP2040/
+ * rp2040.h) — that's a different, incompatible use of the bare identifier
+ * "PWM" than pico-sdk's hardware/pwm.h relies on internally (an assertion-
+ * group name pasted via ##). We never use ChibiOS's macro, so drop it
+ * before pico-sdk's header needs the name back. */
+#undef PWM
+#include "hardware/pwm.h"
 #include "hardware/structs/ioqspi.h"
 #include "hardware/structs/sio.h"
 #include "hardware/sync.h"
@@ -25,9 +32,24 @@
  * Update these once the enclosure is drilled and the LED is wired to its
  * own GPIO. Until then this targets the Pico's onboard LED (GP25) so the
  * toggle/timer logic can be verified with no extra hardware attached.
+ * GP25 is an ordinary GPIO (not a fixed-function pin), so it — and
+ * whatever pin replaces it — can always be driven by the RP2040's PWM
+ * hardware for brightness control, not just on/off.
  * -------------------------------------------------------------------------- */
 #define STATUS_LED_PIN GP25 /* -> external LED GPIO (e.g. GP3) once wired */
 #define STATUS_LED_ACTIVE_HIGH true
+#define STATUS_LED_PWM_WRAP 255 /* 8-bit brightness resolution */
+
+/* Brightness, 0-100, set with `make build BRIGHTNESS=<n>` (see the
+ * top-level Makefile) — no file editing required, same -D-define pattern
+ * as AUTOMATION_MODE above. */
+#ifndef STATUS_LED_BRIGHTNESS
+#    define STATUS_LED_BRIGHTNESS 50
+#endif
+
+#if STATUS_LED_BRIGHTNESS < 0 || STATUS_LED_BRIGHTNESS > 100
+#    error "STATUS_LED_BRIGHTNESS must be between 0 and 100"
+#endif
 
 /* ---- Automation tuning ----------------------------------------------------
  * A real toggle source (BOOTSEL, below) exists, so start disabled and let
@@ -243,8 +265,22 @@ static bool __no_inline_not_in_flash_func(bootsel_pressed)(void) {
     return pressed;
 }
 
+static void status_led_init(void) {
+    gpio_set_function(STATUS_LED_PIN, GPIO_FUNC_PWM);
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_wrap(&config, STATUS_LED_PWM_WRAP);
+    pwm_init(pwm_gpio_to_slice_num(STATUS_LED_PIN), &config, true);
+}
+
 static void status_led_set(bool on) {
-    gpio_write_pin(STATUS_LED_PIN, STATUS_LED_ACTIVE_HIGH ? on : !on);
+    uint16_t level;
+    if (on) {
+        uint16_t on_level = (STATUS_LED_PWM_WRAP * STATUS_LED_BRIGHTNESS) / 100;
+        level             = STATUS_LED_ACTIVE_HIGH ? on_level : (STATUS_LED_PWM_WRAP - on_level);
+    } else {
+        level = STATUS_LED_ACTIVE_HIGH ? 0 : STATUS_LED_PWM_WRAP;
+    }
+    pwm_set_gpio_level(STATUS_LED_PIN, level);
 }
 
 /* Uniform in [AUTOMATION_INTERVAL_MIN_MS, AUTOMATION_INTERVAL_MAX_MS]. */
@@ -275,7 +311,7 @@ static void automation_set(bool enabled) {
 }
 
 void keyboard_post_init_user(void) {
-    gpio_set_pin_output(STATUS_LED_PIN);
+    status_led_init();
     automation_set(AUTOMATION_START_ENABLED);
 }
 

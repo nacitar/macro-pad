@@ -18,6 +18,11 @@ endif
 export AUTOMATION_MODE_VALUE
 export MOUSEKEY_ENABLE_VALUE
 
+# Status LED brightness, 0-100 — see STATUS_LED_BRIGHTNESS in keymap.c.
+# `make build BRIGHTNESS=100` etc.; no file editing required.
+BRIGHTNESS ?= 50
+export BRIGHTNESS
+
 .PHONY: build flash clean doctor info shell link
 
 link:
@@ -29,7 +34,7 @@ link:
 	fi
 
 build: link
-	uv run qmk compile -kb $(KB) -km $(KM) -e AUTOMATION_MODE=$(AUTOMATION_MODE_VALUE) -e MOUSEKEY_ENABLE=$(MOUSEKEY_ENABLE_VALUE)
+	uv run qmk compile -kb $(KB) -km $(KM) -e AUTOMATION_MODE=$(AUTOMATION_MODE_VALUE) -e MOUSEKEY_ENABLE=$(MOUSEKEY_ENABLE_VALUE) -e STATUS_LED_BRIGHTNESS=$(BRIGHTNESS)
 
 flash: link
 	./scripts/flash.sh
