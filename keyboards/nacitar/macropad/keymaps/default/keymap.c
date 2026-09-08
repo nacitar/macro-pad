@@ -14,6 +14,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include QMK_KEYBOARD_H
+#include <hal.h> /* hal_lld_peripheral_unreset() — see status_led_init() */
 #include "hardware/gpio.h"
 /* QMK_KEYBOARD_H pulls in ChibiOS's own RP2040 CMSIS header, which #defines
  * PWM as a peripheral-struct pointer (lib/chibios/os/common/ext/RP/RP2040/
@@ -266,6 +267,16 @@ static bool __no_inline_not_in_flash_func(bootsel_pressed)(void) {
 }
 
 static void status_led_init(void) {
+    /* QMK's ChibiOS build never enables ChibiOS's own PWM driver
+     * (RP_PWM_USE_PWM* are all FALSE in mcuconf.h — this board never
+     * needed PWM before), and each ChibiOS RP2040 peripheral driver is
+     * responsible for taking its own hardware block out of reset (see
+     * hal_pal_lld.c doing the same for IO_BANK0/PADS_BANK0). With no PWM
+     * driver enabled, nothing ever does that for the PWM block, so it's
+     * still held in hardware reset here — pico-sdk's pwm_* calls below
+     * would otherwise be writing to registers that can't respond. */
+    hal_lld_peripheral_unreset(RESETS_ALLREG_PWM);
+
     gpio_set_function(STATUS_LED_PIN, GPIO_FUNC_PWM);
     pwm_config config = pwm_get_default_config();
     pwm_config_set_wrap(&config, STATUS_LED_PWM_WRAP);
